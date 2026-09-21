@@ -58,7 +58,19 @@ This starts a single container — PostgreSQL 16 on port `5432`. That's it.
 
 ---
 
-### 4. Run the app from your terminal
+### 4. Apply database migrations
+
+With the database running, create the schema:
+
+```bash
+python -m alembic upgrade head
+```
+
+Run this once on a fresh database, and again any time a new migration is added.
+
+---
+
+### 5. Run the app from your terminal
 
 ```bash
 python -m uvicorn app.main:app --reload
@@ -83,7 +95,7 @@ http://localhost:8000/docs
 
 ---
 
-### 5. Stop the database
+### 6. Stop the database
 
 ```bash
 # Stop Postgres but keep the volume (data preserved)
@@ -95,7 +107,7 @@ docker compose down -v
 
 ---
 
-### 6. Run tests
+### 7. Run tests
 
 #### Hashing tests — no services needed at all
 
@@ -125,20 +137,17 @@ pytest -v --integration
 
 ---
 
-### 7. Run Alembic migrations
+### 8. Alembic — day-to-day migration commands
 
 ```bash
-# Generate a new migration after changing a model
+# After changing a model, generate a new migration
 python -m alembic revision --autogenerate -m "describe_change"
-
-# Apply pending migrations
-python -m alembic upgrade head
 
 # Roll back one migration
 python -m alembic downgrade -1
 ```
 
-> Run these from your terminal (venv activated) while `docker compose up db` is running.
+> Always run with `docker compose up db` running. `upgrade head` is step 4 on a fresh checkout.
 
 ---
 
@@ -183,18 +192,18 @@ AuditLogService/
 
 ---
 
-### 12. Implementation status
+### 9. Implementation status
 
 | Phase | What | Status |
 |---|---|---|
 | 1 | Scaffold, hashing core, config, Docker, tests | ✅ Complete |
 | 2 | ORM model, schemas, ChainService, Alembic migration 001 | ✅ Complete |
 | 3 | API routes: POST/GET events, GET verify, cursor pagination, API tests | ✅ Complete |
-| 4 | Redaction (migration 002), archival (migration 003), export | 🔲 Next |
+| 4 | Redaction (migration 002), archival (migration 003), export | ✅ Complete |
 
 ---
 
-### 9. Environment variables
+### 10. Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
@@ -205,7 +214,7 @@ AuditLogService/
 
 ---
 
-### 10. API overview
+### 11. API overview
 
 | Method | Path | Description |
 |---|---|---|
@@ -220,7 +229,7 @@ AuditLogService/
 
 ---
 
-### 11. Key design decisions
+### 12. Key design decisions
 
 See [`DECISIONS.md`](DECISIONS.md) for the full Architecture Decision Records covering database choice, hash algorithm, pagination strategy, redaction approach, and more.
 

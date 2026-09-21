@@ -3,10 +3,11 @@ Pydantic v2 schemas for audit event endpoints.
 
 Schema grows incrementally alongside migrations:
   Phase 2  — EventCreate, EventResponse, EventListResponse, VerifyResponse
-  Phase 4  — add redacted_fields to EventResponse; add ArchiveResponse
+  Phase 4  — RedactRequest, ArchiveResponse; extended EventResponse
 
 Naming convention:
   *Create   — inbound (POST body)
+  *Request  — inbound (PATCH / action body)
   *Response — outbound (single item)
   *List     — outbound (paginated collection)
   *Verify   — outbound (chain integrity report)
@@ -69,7 +70,7 @@ class EventResponse(BaseModel):
     resource_id: str
     payload: dict[str, Any]
     payload_hash: str = Field(
-        description="SHA-256 of original payload — unchanged even after redaction (Phase 4)"
+        description="SHA-256 of original payload — unchanged even after redaction"
     )
     entry_hash: str = Field(
         description="SHA-256 over all immutable event fields"
@@ -78,6 +79,23 @@ class EventResponse(BaseModel):
         description="SHA-256 of entry_hash || previous chain_hash"
     )
     created_at: datetime
+
+    # Phase 4 additions -------------------------------------------------------
+    redacted_fields: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "field_name → SHA-256(field_name:original_value) for each redacted "
+            "payload field. Null until at least one field is redacted."
+        ),
+    )
+    is_archived: bool = Field(
+        default=False,
+        description="True once POST /archive has been called on this entry",
+    )
+    archived_at: datetime | None = Field(
+        default=None,
+        description="UTC timestamp when is_archived was set to true, else null",
+    )
 
     model_config = {"from_attributes": True}
 
@@ -94,6 +112,31 @@ class EventListResponse(BaseModel):
         ),
     )
     total_returned: int
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 request / response schemas
+# ---------------------------------------------------------------------------
+
+class RedactRequest(BaseModel):
+    """Body for PATCH /audit/events/{id}/redact."""
+
+    fields: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Names of payload fields to redact",
+        examples=[["ssn", "card_number"]],
+    )
+
+
+class ArchiveResponse(BaseModel):
+    """Response from POST /audit/events/{id}/archive."""
+
+    id: uuid.UUID
+    is_archived: bool
+    archived_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,41 @@ Running log of AI assistance used during development. Entries are grouped by fea
 
 ---
 
+## Phase 4 — Redaction, archival, and export
+
+**Tool:** Claude (Anthropic)
+
+**What I prompted for:**
+- Alembic migrations 002 (add `redacted_fields` JSON column) and 003 (add `is_archived`, `archived_at` columns)
+- Update ORM model and Pydantic schemas to include the three new columns
+- `redaction_service.py` — field-level redaction that never touches `payload_hash`, `entry_hash`, or `chain_hash`
+- `retention_service.py` — soft-archive (sets `is_archived`/`archived_at`; no physical deletion ever)
+- `export_service.py` — streaming JSON and CSV export using async generators and cursor pagination
+- `PATCH /audit/events/{id}/redact` and `POST /audit/events/{id}/archive` routes
+- `GET /audit/export?format=json|csv&include_archived=true|false` route
+- `tests/test_redaction.py` — 14 tests covering redaction and archival behaviour
+- `tests/test_export.py` — 13 tests covering JSON and CSV export
+
+**What AI produced:**
+- `alembic/versions/002_add_redaction.py` — adds `redacted_fields` JSON column (nullable, null until first redaction)
+- `alembic/versions/003_add_archival.py` — adds `is_archived` boolean and `archived_at` timestamptz
+- Updated `app/models/audit_entry.py` — `Boolean` added to imports; three new mapped columns with comments
+- Updated `app/schemas/event.py` — `redacted_fields`, `is_archived`, `archived_at` added to `EventResponse`; `RedactRequest` and `ArchiveResponse` added
+- `app/services/redaction_service.py` — `redact_fields()`: sets payload values to None, records SHA-256 proof in `redacted_fields`, skips missing/null fields idempotently, raises `ValueError` on archived entry
+- `app/services/retention_service.py` — `archive_entry()`: sets `is_archived=True` and `archived_at=now(UTC)`, idempotent on already-archived entries
+- `app/services/export_service.py` — `export_json()` and `export_csv()` as async generators, paginated in 500-row batches to avoid buffering large result sets
+- `app/api/routes/redaction.py` — PATCH redact (200/404/409) and POST archive (200/404) endpoints
+- `app/api/routes/export.py` — GET export with `format` and `include_archived` query params; FastAPI `StreamingResponse`
+- Updated `app/main.py` — redaction and export routers registered
+- `tests/test_redaction.py` — 14 test cases: payload nulling, multi-field, hash immutability, chain validity post-redact, 404, 409 on archived, idempotency, 422 on empty fields list; archive sets flag, persists, idempotent, 404, chain valid after archive
+- `tests/test_export.py` — 13 test cases: empty, all events, field coverage, exclude/include archived, redacted_fields in export, content-type, 422 on invalid format; CSV header, JSON-encoded payload column, content-type
+
+**What I decided / changed:**
+- Confirmed soft-archive over physical delete: deleting a row would orphan the next row's `previous_hash` reference and break chain verification
+- Confirmed chain-safe redaction: `payload_hash` is the immutable anchor — `entry_hash` and `chain_hash` derive from it, not from the raw payload, so nulling payload fields never invalidates the chain
+- `redacted_fields` stores SHA-256 proofs so verifiers can prove what a redacted field originally held without revealing its value
+- Export uses async generators + cursor pagination to stream arbitrarily large result sets without server-side buffering
+
 <!-- ============================================================
      TEMPLATE — copy and fill in for each future phase/feature
      ============================================================
