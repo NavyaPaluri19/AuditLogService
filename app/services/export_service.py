@@ -110,6 +110,13 @@ async def export_json(
         if len(rows) < _PAGE_SIZE:
             break
 
+    # Explicitly end the implicit read transaction before yielding the
+    # final chunk.  Without this, the session still holds an open
+    # transaction (ACCESS SHARE lock on the table) when control returns
+    # to the caller.  That lock blocks the next DROP TABLE in tests and
+    # can delay connection cleanup in production pools.
+    await session.commit()
+
     yield "\n]\n"
 
 
@@ -163,3 +170,6 @@ async def export_csv(
         last_seq = rows[-1].sequence_number
         if len(rows) < _PAGE_SIZE:
             break
+
+    # Explicitly end the implicit read transaction (same reason as export_json).
+    await session.commit()

@@ -2,20 +2,28 @@
 ChainService — the heart of the tamper-evident append-only log.
 
 Two public functions:
-  append()       — write a new entry, holding a FOR UPDATE lock on the tail
+  append()       — write a new entry, using pg_advisory_xact_lock to serialise
   verify_chain() — walk every entry in order and recompute both hashes
 
 Design notes
 ------------
-SELECT ... FOR UPDATE on the most-recent row serialises all concurrent writers:
-  - Only one transaction can hold the lock at a time.
-  - The next writer must wait until the first commits, then re-reads the new tail.
-  - This prevents chain forks and sequence gaps even under heavy concurrency.
+pg_advisory_xact_lock(1) is used on PostgreSQL to serialise all concurrent
+appenders.  It is a true session-level mutex:
+  - Only one transaction holds it at a time.
+  - It is released automatically when the transaction commits or rolls back.
+  - All other appenders block until the current holder commits.
 
-SQLite (used in tests) does not support FOR UPDATE; the lock is silently
-ignored there. That's acceptable because test code is single-threaded and the
-test that exercises locking behaviour is marked with pytest.mark.integration
-and runs against live Postgres only.
+Why not SELECT ... FOR UPDATE?
+  FOR UPDATE prevents UPDATE/DELETE on the locked row, but it does NOT prevent
+  another transaction from INSERT-ing a new row.  Under concurrent appends:
+  - T1 and T2 both lock row N (the seed / current tail) with FOR UPDATE.
+  - T1 inserts row N+1 and commits, releasing the row-lock on row N.
+  - T2 wakes up, re-reads row N (NOT the new tail N+1), computes seq N+1,
+    and collides with T1's insert → UniqueConstraint violation.
+  pg_advisory_xact_lock avoids this entirely.
+
+SQLite (used in unit tests) is single-threaded and has no advisory locks;
+we skip the lock there — concurrent inserts are not possible in that env.
 
 Datetime normalisation
 ----------------------
@@ -28,7 +36,7 @@ before passing it to compute_entry_hash().
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.hashing import (
@@ -67,20 +75,34 @@ async def append(session: AsyncSession, data: EventCreate) -> AuditEntry:
 
     Steps
     -----
-    1. Lock the current tail row with SELECT ... FOR UPDATE.
-    2. Derive the next sequence_number and previous_hash from it.
+    1. Acquire pg_advisory_xact_lock(1) on PostgreSQL — a true mutex that
+       serialises all concurrent appenders.  Skipped on SQLite (single-
+       threaded in tests, no concurrent inserts possible).
+    2. Read the current tail row to get previous_hash and sequence_number.
     3. Compute payload_hash, entry_hash, chain_hash.
-    4. Insert the new row and commit.
+    4. Insert the new row and commit.  The advisory lock is released on commit.
 
-    The lock in step 1 means only one writer proceeds at a time —
+    The advisory lock in step 1 means only one writer proceeds at a time —
     the chain is always a single, linear, gap-free sequence.
     """
-    # -- 1. Lock the tail ---------------------------------------------------
+    # -- 1. Serialise concurrent appenders ------------------------------------
+    # pg_advisory_xact_lock is a PostgreSQL-native session mutex released
+    # automatically on commit/rollback.  Only one appender holds it at a time,
+    # so by the time we read the tail in step 2, no other appender can insert
+    # between our read and our insert.
+    #
+    # SELECT ... FOR UPDATE cannot do this: it locks an existing row but does
+    # NOT block INSERT of new rows, leading to UniqueConstraint collisions when
+    # two transactions both read the same "last" row and both compute seq N+1.
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(text("SELECT pg_advisory_xact_lock(1)"))
+
+    # -- 2. Read the current tail -------------------------------------------
     result = await session.execute(
         select(AuditEntry)
         .order_by(AuditEntry.sequence_number.desc())
         .limit(1)
-        .with_for_update()          # blocks concurrent appends until we commit
     )
     last: AuditEntry | None = result.scalars().first()
 
@@ -92,10 +114,10 @@ async def append(session: AsyncSession, data: EventCreate) -> AuditEntry:
         previous_hash = last.chain_hash
         sequence_number = last.sequence_number + 1
 
-    # -- 2. Capture timestamp -----------------------------------------------
+    # -- 3. Capture timestamp -----------------------------------------------
     now = datetime.now(timezone.utc)    # always UTC-aware
 
-    # -- 3. Compute hashes --------------------------------------------------
+    # -- 4. Compute hashes --------------------------------------------------
     p_hash = hash_payload(data.payload)
 
     e_hash = compute_entry_hash(
@@ -110,7 +132,7 @@ async def append(session: AsyncSession, data: EventCreate) -> AuditEntry:
 
     c_hash = compute_chain_hash(e_hash, previous_hash)
 
-    # -- 4. Persist ---------------------------------------------------------
+    # -- 5. Persist ---------------------------------------------------------
     entry = AuditEntry(
         sequence_number=sequence_number,
         event_type=data.event_type,

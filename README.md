@@ -123,17 +123,38 @@ Pure Python, instant, no DB required.
 pytest -v
 ```
 
-All tests use `aiosqlite` (SQLite in-memory) by default — no running Postgres needed.
+All 77 tests use `aiosqlite` (SQLite in-memory) by default — no running Postgres needed.
 
-> **Note:** `SELECT ... FOR UPDATE` (chain lock) is not supported by SQLite. That specific test is skipped locally and covered by the PostgreSQL integration test when running against the live DB.
+> **Note:** `SELECT ... FOR UPDATE` (chain lock) is silently ignored by aiosqlite. The chain lock is covered by the PostgreSQL integration tests below.
 
-#### Against live Postgres (integration)
+#### Integration tests — against live Postgres
 
-With `docker compose up db` running and the app's `DATABASE_URL` pointing at it:
+Integration tests live in `tests/test_integration.py` and are **skipped automatically** unless you pass `--integration`.  They require the Docker Compose database to be running.
 
 ```bash
-pytest -v --integration
+docker compose up db             # start Postgres (keep running in background)
+pytest -v --integration          # run all tests, including integration
+pytest -v --integration -k integration   # run only the integration tests
 ```
+
+**What the integration tests cover that SQLite cannot:**
+
+| Test group | Why Postgres is required |
+|---|---|
+| Concurrent appends (2 and 10 simultaneous) | `SELECT ... FOR UPDATE` is a no-op in aiosqlite; only Postgres actually serialises writers |
+| Chain fork prevention | Verifies no duplicate `sequence_number` arises under true concurrent load |
+| Full lifecycle (append → redact → archive → verify) | Exercises the real JSONB, BOOLEAN, and TIMESTAMPTZ column types from migrations 001–003 |
+| Export streaming on real data | Confirms async generator cursor-batching works against Postgres's wire protocol |
+| Cursor pagination stability | Appends a new event mid-page and confirms earlier pages are unaffected |
+
+**Integration test fixtures** (defined in `tests/conftest.py`):
+
+| Fixture | Scope | Description |
+|---|---|---|
+| `pg_engine` | function | Creates a fresh Postgres engine, drops and recreates schema, tears down after each test |
+| `pg_client` | function | `httpx.AsyncClient` wired to FastAPI using `pg_engine`; mirrors the SQLite `client` fixture |
+
+> **Warning:** `pg_engine` drops all tables at the start of each test.  Always run `--integration` against the Docker Compose database (`localhost:5432`), never against production.
 
 ---
 

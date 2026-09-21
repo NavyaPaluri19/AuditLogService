@@ -156,9 +156,64 @@ Cursor pagination using `WHERE sequence_number > :after_sequence ORDER BY sequen
 
 ## ADR-010 — Archival: soft-delete, never physical delete
 
-**Decision:** Old records set `archived_at`, move payload to `archive_ref` (cold storage pointer), but the row — with all hash fields — stays in the `audit_entries` table.
+**Decision:** `POST /audit/events/{id}/archive` sets `is_archived = true` and `archived_at = now(UTC)` on the row. The row — including the payload and all four hash columns — stays in `audit_entries` unchanged.
 
-**Why:**
-- Physical deletion of a row breaks the chain: the next record's `previous_hash` points to a record that no longer exists
-- Keeping the row with hashes intact means `GET /audit/verify` still walks end-to-end and reports valid
-- The payload can be retrieved from cold storage if ever needed for legal proceedings
+**Why no physical delete:**
+- Deleting a row breaks the chain: the next row's `previous_chain_hash` references a hash that no longer exists, so `GET /audit/verify` reports a broken chain
+- Keeping the row with all hash fields intact means chain verification walks end-to-end without modification
+- Archived rows remain visible to `GET /audit/events` and are included in exports and chain verification by design — the archive flag signals "this record is no longer operationally active" while preserving it for legal / compliance purposes
+
+**Why no payload truncation / cold storage pointer:**
+Truncating the payload or replacing it with a cold-storage reference would also change `payload` without updating `payload_hash` — creating a permanently inconsistent row. The payload stays in-row unless a redaction is applied through the normal `PATCH /redact` endpoint.
+
+**Operation is idempotent:** calling archive on an already-archived entry returns 200 and preserves the original `archived_at` timestamp.
+
+---
+
+## ADR-011 — Export: async generator streaming, not buffered response
+
+**Decision:** `GET /audit/export` uses async generator functions (`export_json`, `export_csv`) fed to FastAPI's `StreamingResponse`, with internal cursor-based batching (500 rows per DB round-trip).
+
+**Alternatives considered:**
+
+| Option | Memory use | Latency to first byte | Complexity |
+|---|---|---|---|
+| **Async generator + StreamingResponse** | O(batch) | Low — bytes flow immediately | Medium |
+| Load all rows → return list | O(n) — blows up on large tables | High — client waits for full query | Low |
+| Server-Sent Events / WebSocket | O(batch) | Low | High |
+
+**Why streaming:**
+- An audit log can contain millions of rows; buffering them all into a Python list before writing the response would exhaust server memory
+- Cursor pagination inside the generator (`WHERE sequence_number > last_seq`) uses the existing B-tree index and keeps DB round-trips bounded regardless of table size
+- `StreamingResponse` in FastAPI forwards chunks to the HTTP client as they arrive — no extra buffering layer
+
+**Format decisions:**
+- JSON: top-level array with one object per line — valid JSON and line-delimited, easy to `jq`-pipe
+- CSV: RFC 4180; `payload` and `redacted_fields` columns are JSON-encoded strings so the schema stays flat
+
+---
+
+## ADR-012 — Archived entries block field redaction (409 Conflict)
+
+**Decision:** `PATCH /audit/events/{id}/redact` returns **409 Conflict** when the entry is already archived.
+
+**Rationale:**
+- Archival signals that an entry has completed its operational lifecycle and is being retained for compliance purposes; allowing further mutation after archival undermines the semantic of "this record is closed"
+- The order matters: an operator should redact sensitive fields first, then archive — the 409 enforces that ordering rather than silently allowing post-archive redaction
+- Redaction itself is always chain-safe (hashes never change), but the business rule that archived records are immutable is the right guardrail for an audit system
+
+**Alternative considered:** allow redaction on archived entries — rejected because it makes the archive state meaningless as an immutability signal.
+
+---
+
+## ADR-013 — Legacy Column() for Phase 4 nullable ORM columns (Python 3.14 compat)
+
+**Decision:** The three Phase 4 columns (`redacted_fields`, `is_archived`, `archived_at`) are defined using the SQLAlchemy legacy `Column()` form rather than the `Mapped[Optional[X]] = mapped_column(…)` form used for all Phase 1–3 columns.
+
+**Root cause:** Python 3.14 changed the internal contract of `typing.Union.__getitem__` — it now requires the receiver to be a `typing.Union` instance, not the bare class. SQLAlchemy's internal `make_union_type()` utility calls `Union.__getitem__(types_tuple)` directly, which raises `TypeError` in 3.14 for any `Mapped[X | None]` or `Mapped[Optional[X]]` annotation.
+
+**Fix:** `Column()` definitions carry no Python type annotation on the class, so SQLAlchemy's annotation scanner never invokes `make_union_type()` for them. The runtime behaviour — nullability, column type, default value — is identical.
+
+**Scope:** Only nullable columns need this workaround. Non-nullable `Mapped[str]`, `Mapped[int]`, `Mapped[dict]`, `Mapped[bool]`, `Mapped[datetime]` are not union types and are unaffected.
+
+**Future:** Once SQLAlchemy releases a version with Python 3.14 compatibility (expected in a 2.0.x patch), these three columns can be migrated back to the `Mapped[Optional[X]]` form without any data migration.
