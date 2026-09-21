@@ -64,6 +64,56 @@ Running log of AI assistance used during development. Entries are grouped by fea
 
 ---
 
+---
+
+## Phase 2 — ORM model, schemas, chain service, Alembic
+
+**Tool:** Claude (Anthropic)
+
+**What I prompted for:**
+- SQLAlchemy ORM model for `audit_entries` table — core chain fields only (no archival/redaction yet, incremental schema)
+- Pydantic v2 request/response schemas for Phase 2 endpoints
+- Real `ChainService.append()` with `SELECT ... FOR UPDATE` tail lock and `verify_chain()` walking the full chain
+- Async-compatible `alembic/env.py` and initial migration `001_initial_schema.py`
+
+**What AI produced:**
+- `app/models/audit_entry.py` — ORM model with 9 core columns, indexes, and comments documenting which migration each future column belongs to
+- `app/schemas/event.py` — `EventCreate`, `EventResponse`, `EventListResponse`, `VerifyResponse`
+- `app/services/chain_service.py` — `append()` with FOR UPDATE lock + UTC datetime normalisation for SQLite/PostgreSQL compat; `verify_chain()` recomputing both `entry_hash` and `chain_hash` per entry
+- `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, `alembic/versions/001_initial_schema.py`
+- Import wiring in `app/main.py` so `Base.metadata` picks up the model
+
+**What I decided / changed:**
+- Pushed back on including `is_archived`/`archived_at`/`redacted_fields` in the initial schema — those belong to Phase 4 (incremental development principle)
+- Confirmed service-layer sequence_number assignment (under the FOR UPDATE lock) rather than a PostgreSQL SEQUENCE — equivalent correctness, simpler cross-DB compatibility
+
+---
+
+## Phase 3 — API routes (events + verify)
+
+**Tool:** Claude (Anthropic)
+
+**What I prompted for:**
+- `POST /audit/events`, `GET /audit/events`, `GET /audit/events/{id}` — events router
+- `GET /audit/verify` — verify router
+- Cursor-based pagination via `query_service`
+- `tests/conftest.py` with in-memory SQLite fixture and FastAPI dependency override
+- `tests/test_api.py` covering all Phase 3 endpoints
+
+**What AI produced:**
+- `app/services/query_service.py` — `list_events()` (keyset pagination, fetch limit+1 trick) and `get_event_by_id()`
+- `app/api/routes/events.py` — three endpoints wired to chain_service and query_service via `Depends(get_db)`
+- `app/api/routes/verify.py` — single GET route delegating to `chain_service.verify_chain()`
+- `app/main.py` updated — events and verify routers registered; redaction/export commented out for Phase 4
+- `tests/conftest.py` — `db_engine` and `client` fixtures; `get_db` dependency overridden with per-request SQLite sessions
+- `tests/test_api.py` — 27 test cases across health, append, get-by-id, list (pagination), and verify
+
+**What I decided / changed:**
+- `after_sequence` instruction: update DECISIONS.md and README after each phase — my standing rule
+- Confirmed keyset cursor uses `sequence_number` (not a UUID or opaque token) — transparent, debuggable, and directly usable for chain ordering
+
+---
+
 <!-- ============================================================
      TEMPLATE — copy and fill in for each future phase/feature
      ============================================================

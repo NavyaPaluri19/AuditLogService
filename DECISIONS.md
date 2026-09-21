@@ -1,6 +1,7 @@
 # Architecture Decision Records
 
 Decisions made during design and implementation, including tradeoffs considered.
+Referenced during the live panel defense.
 
 ---
 
@@ -18,8 +19,7 @@ Decisions made during design and implementation, including tradeoffs considered.
 
 **Why PostgreSQL wins for this project:**
 - `JSONB` column type for `payload` — supports GIN indexes for querying inside JSON payloads without scanning every row
-- Native `SEQUENCE` object (`audit_entry_seq`) gives us a DB-enforced monotonic counter — critical for chain ordering, cannot be faked by the application layer
-- `SELECT ... FOR UPDATE` row-level locking lets `ChainService.append` safely read the last row and prevent concurrent chain forks in a single atomic block
+- `SELECT ... FOR UPDATE` row-level locking lets `ChainService.append` safely read the last row and prevent concurrent chain forks in a single atomic block; `sequence_number` is assigned as `last.sequence_number + 1` inside that lock — gap-free and strictly monotonic without needing a separate DB sequence object
 - ACID transactions mean write + hash update is truly atomic — no partial chain states
 - Industry standard for financial systems; Schwab's own stack almost certainly includes PostgreSQL
 

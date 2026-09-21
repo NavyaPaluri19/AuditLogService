@@ -1,0 +1,96 @@
+"""
+Event routes — core append-and-query operations.
+
+POST /audit/events         Append a new event to the chain
+GET  /audit/events         List events with cursor pagination
+GET  /audit/events/{id}    Fetch a single event by UUID
+"""
+
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.session import get_db
+from app.schemas.event import EventCreate, EventListResponse, EventResponse
+from app.services import chain_service, query_service
+
+router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# POST /audit/events
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/events",
+    response_model=EventResponse,
+    status_code=201,
+    summary="Append a new audit event",
+    description=(
+        "Appends an event to the tamper-evident chain. "
+        "The server computes payload_hash, entry_hash, and chain_hash — "
+        "these are not accepted from the caller."
+    ),
+)
+async def append_event(
+    body: EventCreate,
+    db: AsyncSession = Depends(get_db),
+) -> EventResponse:
+    entry = await chain_service.append(db, body)
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# GET /audit/events
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/events",
+    response_model=EventListResponse,
+    summary="List audit events (cursor-paginated)",
+    description=(
+        "Returns audit entries ordered by sequence_number ascending. "
+        "Use ?after_sequence=<n> to continue from a previous page. "
+        "next_cursor in the response is the sequence_number to pass next time."
+    ),
+)
+async def list_events(
+    after_sequence: int | None = Query(
+        default=None,
+        ge=1,
+        description="Return entries with sequence_number > this value",
+    ),
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum number of entries to return (1–500)",
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> EventListResponse:
+    entries, next_cursor = await query_service.list_events(db, after_sequence, limit)
+    return EventListResponse(
+        items=entries,
+        next_cursor=next_cursor,
+        total_returned=len(entries),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /audit/events/{event_id}
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/events/{event_id}",
+    response_model=EventResponse,
+    summary="Get a single audit event by ID",
+)
+async def get_event(
+    event_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> EventResponse:
+    entry = await query_service.get_event_by_id(db, event_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return entry
