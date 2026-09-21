@@ -123,9 +123,9 @@ Pure Python, instant, no DB required.
 pytest -v
 ```
 
-All 77 tests use `aiosqlite` (SQLite in-memory) by default — no running Postgres needed.
+All 88 tests use `aiosqlite` (SQLite in-memory) by default — no running Postgres needed.
 
-> **Note:** `SELECT ... FOR UPDATE` (chain lock) is silently ignored by aiosqlite. The chain lock is covered by the PostgreSQL integration tests below.
+> **Note:** `pg_advisory_xact_lock` (chain serialisation) is skipped on aiosqlite — it's gated on `conn.dialect.name == "postgresql"`. Concurrent-append serialisation is covered by the PostgreSQL integration tests below.
 
 #### Integration tests — against live Postgres
 
@@ -141,7 +141,7 @@ pytest -v --integration -k integration   # run only the integration tests
 
 | Test group | Why Postgres is required |
 |---|---|
-| Concurrent appends (2 and 10 simultaneous) | `SELECT ... FOR UPDATE` is a no-op in aiosqlite; only Postgres actually serialises writers |
+| Concurrent appends (2 and 10 simultaneous) | `pg_advisory_xact_lock` is skipped in aiosqlite; only Postgres actually serialises writers |
 | Chain fork prevention | Verifies no duplicate `sequence_number` arises under true concurrent load |
 | Full lifecycle (append → redact → archive → verify) | Exercises the real JSONB, BOOLEAN, and TIMESTAMPTZ column types from migrations 001–003 |
 | Export streaming on real data | Confirms async generator cursor-batching works against Postgres's wire protocol |
@@ -189,20 +189,24 @@ AuditLogService/
 │   ├── schemas/
 │   │   └── event.py         # Pydantic v2 request/response schemas
 │   ├── services/
-│   │   ├── chain_service.py     # append() with FOR UPDATE lock, verify_chain()
-│   │   ├── query_service.py     # cursor-based pagination (Phase 3)
+│   │   ├── chain_service.py     # append() with pg_advisory_xact_lock, verify_chain()
+│   │   ├── query_service.py     # cursor-based pagination + filters (Phase 3)
 │   │   ├── redaction_service.py # field-level redaction (Phase 4)
-│   │   ├── export_service.py    # JSON / CSV export (Phase 4)
+│   │   ├── export_service.py    # JSON / CSV streaming export with filters (Phase 4)
 │   │   └── retention_service.py # soft-delete archival (Phase 4)
 │   └── main.py              # FastAPI app + lifespan + router registration
 ├── alembic/
 │   └── versions/
-│       └── 001_initial_schema.py  # Core chain columns
+│       ├── 001_initial_schema.py        # Core chain columns
+│       ├── 002_add_redaction_columns.py # redacted_fields, payload_hash
+│       └── 003_add_archival_columns.py  # is_archived, archived_at
 ├── tests/
 │   └── test_hashing.py      # Exhaustive hashing unit tests (run these first)
 ├── ATTESTATION.md           # Authorship and AI usage declaration
 ├── AI_LOG.md                # Running log of AI interactions by phase
-├── DECISIONS.md             # Architecture Decision Records (ADR-001 → ADR-010)
+├── DECISIONS.md             # Architecture Decision Records (ADR-001 → ADR-013)
+├── SCENARIO_C.md            # Ambiguous requirement clarification write-up
+├── SUMMARY.md               # Final engineering summary
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -241,11 +245,11 @@ AuditLogService/
 |---|---|---|
 | `GET` | `/health` | Health check |
 | `POST` | `/audit/events` | Append a new audit event |
-| `GET` | `/audit/events` | List events (cursor pagination: `?after_sequence=<int>`) |
+| `GET` | `/audit/events` | List events (cursor pagination + filters: `?after_sequence=<int>&actor_id=…&resource_type=…&event_type=…&from_time=…&to_time=…`) |
 | `GET` | `/audit/events/{id}` | Get a single event |
 | `GET` | `/audit/verify` | Verify end-to-end chain integrity |
 | `PATCH` | `/audit/events/{id}/redact` | Redact fields (chain-safe) |
-| `GET` | `/audit/export` | Export events as JSON or CSV |
+| `GET` | `/audit/export` | Export events as JSON or CSV (filterable: `?actor_id=…&resource_type=…&resource_id=…`) |
 | `POST` | `/audit/events/{id}/archive` | Soft-archive an event (never physically deleted) |
 
 ---

@@ -114,11 +114,17 @@ Cursor pagination using `WHERE sequence_number > :after_sequence ORDER BY sequen
 
 ## ADR-007 — Single writer pattern for chain append
 
-**Decision:** `ChainService.append` uses `SELECT ... FOR UPDATE` on the last row before inserting.
+**Decision:** `ChainService.append` uses `SELECT pg_advisory_xact_lock(1)` (PostgreSQL session-level mutex) before reading the tail row and inserting.
 
-**Why:** Without a lock, two concurrent requests could both read the same `last_entry` and both try to write a new record pointing to it — forking the chain. The lock serialises appends so only one writer can hold "last row" at a time.
+**Why not `SELECT ... FOR UPDATE`:**  
+`FOR UPDATE` prevents two writers from *updating or deleting* the locked row, but it does **not** prevent them from each reading the same last row and both inserting a new row claiming the same `sequence_number`. In practice: T1 and T2 both lock the seed row, both compute `sequence_number = last + 1 = 2`, T1 inserts and commits, T2 wakes up — it still holds its own read of row 1 and tries to insert another row with `sequence_number = 2`, causing a `UniqueViolationError`. This race was confirmed by `test_pg_concurrent_appends_no_chain_fork`.
 
-**Tradeoff:** This limits write throughput to ~sequential appends. For this assignment's scope (compliance audit log, not a high-frequency trading feed), this is acceptable. At higher scale, a write queue or a dedicated sequence table would be considered.
+**Why `pg_advisory_xact_lock(1)`:**  
+Advisory locks are PostgreSQL session mutexes. Only one transaction can hold advisory lock key `1` at a time; the second transaction blocks at the `SELECT pg_advisory_xact_lock(1)` call until the first commits. This guarantees strictly monotonic, gap-free sequence numbers under any concurrency level. The lock is automatically released on commit or rollback — no manual cleanup.
+
+**SQLite compatibility:** The advisory lock call is gated on `conn.dialect.name == "postgresql"` so test runs against aiosqlite continue to work unchanged. SQLite is single-threaded and never exercises the concurrent-write path.
+
+**Tradeoff:** This limits write throughput to ~sequential appends. For this assignment's scope (compliance audit log, not a high-frequency trading feed), this is acceptable. At higher scale, a write queue (Kafka / SQS) or a dedicated sequence table with `RETURNING` would be considered.
 
 ---
 

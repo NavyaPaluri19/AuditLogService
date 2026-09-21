@@ -12,6 +12,9 @@ Design:
     so the file is both valid JSON and easy to stream.
   - CSV format: RFC 4180 compliant; payload is JSON-encoded into a single
     column; redacted_fields likewise.
+  - Optional actor_id / resource_type / resource_id filters let callers
+    export a self-contained, verifiable bundle for a specific actor or
+    resource (Scenario B requirement).
 """
 
 import csv
@@ -68,10 +71,40 @@ def _entry_to_dict(entry: AuditEntry) -> dict[str, Any]:
     }
 
 
+def _build_base_query(
+    *,
+    include_archived: bool,
+    actor_id: str | None,
+    resource_type: str | None,
+    resource_id: str | None,
+):
+    """
+    Build the base SELECT with all static filters applied.
+
+    The cursor (sequence_number > last_seq) is added per-page inside the
+    export loops rather than here so the same base query can be reused.
+    """
+    q = select(AuditEntry).order_by(AuditEntry.sequence_number.asc())
+
+    if not include_archived:
+        q = q.where(AuditEntry.is_archived.is_(False))
+    if actor_id is not None:
+        q = q.where(AuditEntry.actor_id == actor_id)
+    if resource_type is not None:
+        q = q.where(AuditEntry.resource_type == resource_type)
+    if resource_id is not None:
+        q = q.where(AuditEntry.resource_id == resource_id)
+
+    return q
+
+
 async def export_json(
     session: AsyncSession,
     *,
     include_archived: bool = True,
+    actor_id: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Yield chunks of a JSON array of audit entries, suitable for
@@ -88,12 +121,17 @@ async def export_json(
     last_seq: int | None = None
     yield "[\n"
 
+    base_q = _build_base_query(
+        include_archived=include_archived,
+        actor_id=actor_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+    )
+
     while True:
-        q = select(AuditEntry).order_by(AuditEntry.sequence_number.asc())
+        q = base_q
         if last_seq is not None:
             q = q.where(AuditEntry.sequence_number > last_seq)
-        if not include_archived:
-            q = q.where(AuditEntry.is_archived.is_(False))
         q = q.limit(_PAGE_SIZE)
 
         result = await session.execute(q)
@@ -124,6 +162,9 @@ async def export_csv(
     session: AsyncSession,
     *,
     include_archived: bool = True,
+    actor_id: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Yield chunks of CSV text suitable for StreamingResponse with
@@ -139,13 +180,17 @@ async def export_csv(
     yield buf.getvalue()
 
     last_seq: int | None = None
+    base_q = _build_base_query(
+        include_archived=include_archived,
+        actor_id=actor_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+    )
 
     while True:
-        q = select(AuditEntry).order_by(AuditEntry.sequence_number.asc())
+        q = base_q
         if last_seq is not None:
             q = q.where(AuditEntry.sequence_number > last_seq)
-        if not include_archived:
-            q = q.where(AuditEntry.is_archived.is_(False))
         q = q.limit(_PAGE_SIZE)
 
         result = await session.execute(q)
