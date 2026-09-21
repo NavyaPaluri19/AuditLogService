@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.db.session import Base, engine
+from app.models import audit_entry as _models  # noqa: F401 — registers models with Base.metadata
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,20 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+
+# ---------------------------------------------------------------------------
+# Routers — uncomment as each phase is implemented
+# ---------------------------------------------------------------------------
+# from app.api.routes.events import router as events_router
+# from app.api.routes.verify import router as verify_router
+# from app.api.routes.redaction import router as redaction_router
+# from app.api.routes.export import router as export_router
+# app.include_router(events_router, prefix="/audit", tags=["events"])
+# app.include_router(verify_router, prefix="/audit", tags=["verify"])
+# app.include_router(redaction_router, prefix="/audit", tags=["redaction"])
+# app.include_router(export_router, prefix="/audit", tags=["export"])
+
 
 # ---------------------------------------------------------------------------
 # Health check
