@@ -1,0 +1,21 @@
+# Python 3.14
+# After a successful install you can lock exact versions: pip freeze > requirements_locked.txt
+
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Database
+sqlalchemy[asyncio]==2.0.35
+asyncpg>=0.30.0           # async PostgreSQL driver — 0.30+ ships Python 3.13/3.14 wheels
+aiosqlite==0.20.0         # async SQLite driver (tests only)
+alembic==1.13.3
+
+# Validation & config
+pydantic>=2.10.0          # 2.10+ uses PyO3 0.23+, which supports Python 3.13 and 3.14
+pydantic-settings>=2.5.2
+
+# Testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2             # async test client for FastAPI
