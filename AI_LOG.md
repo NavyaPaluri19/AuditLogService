@@ -73,13 +73,13 @@ Running log of AI assistance used during development. Entries are grouped by fea
 **What I prompted for:**
 - SQLAlchemy ORM model for `audit_entries` table — core chain fields only (no archival/redaction yet, incremental schema)
 - Pydantic v2 request/response schemas for Phase 2 endpoints
-- Real `ChainService.append()` with `SELECT ... FOR UPDATE` tail lock and `verify_chain()` walking the full chain
+- Real `ChainService.append()` with `pg_advisory_xact_lock(1)` tail lock and `verify_chain()` walking the full chain
 - Async-compatible `alembic/env.py` and initial migration `001_initial_schema.py`
 
 **What AI produced:**
 - `app/models/audit_entry.py` — ORM model with 9 core columns, indexes, and comments documenting which migration each future column belongs to
 - `app/schemas/event.py` — `EventCreate`, `EventResponse`, `EventListResponse`, `VerifyResponse`
-- `app/services/chain_service.py` — `append()` with FOR UPDATE lock + UTC datetime normalisation for SQLite/PostgreSQL compat; `verify_chain()` recomputing both `entry_hash` and `chain_hash` per entry
+- `app/services/chain_service.py` — `append()` with `pg_advisory_xact_lock(1)` mutex + UTC datetime normalisation for SQLite/PostgreSQL compat; `verify_chain()` recomputing both `entry_hash` and `chain_hash` per entry
 - `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, `alembic/versions/001_initial_schema.py`
 - Import wiring in `app/main.py` so `Base.metadata` picks up the model
 

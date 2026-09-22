@@ -10,22 +10,17 @@ automatically skips the test when --integration is not passed.
 
 What these tests cover that SQLite unit tests cannot
 ------------------------------------------------------
-1. SELECT ... FOR UPDATE serialisation
-   aiosqlite silently ignores FOR UPDATE.  Here we fire two concurrent
-   append requests via asyncio.gather() and verify that:
+1. pg_advisory_xact_lock(1) serialisation
+   aiosqlite skips the advisory lock call (gated on dialect == "postgresql").
+   Here we fire two concurrent append requests via asyncio.gather() and verify:
    - both succeed (201)
    - no sequence_number is duplicated
    - the resulting chain verifies end-to-end without gaps
 
-   NOTE on the genesis edge case
-   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   SELECT ... FOR UPDATE locks an existing row.  When the table is completely
-   empty every concurrent append sees no row to lock, computes sequence_number=1,
-   and races toward a UniqueConstraint collision.  The concurrent tests below
-   seed one event first so the lock always has a row to acquire.  In production
-   this would be handled with a pg_advisory_xact_lock() call at the start of
-   every append; for this project the FOR UPDATE approach is correct for the
-   steady-state case that matters most.
+   The advisory lock is a true PostgreSQL session mutex: the second writer
+   blocks at SELECT pg_advisory_xact_lock(1) until the first commits, so
+   sequence numbers are always strictly monotonic regardless of concurrency.
+   The lock is released automatically on commit or rollback — no cleanup needed.
 
 2. Chain integrity across the full migration schema
    All three Alembic migrations (001, 002, 003) have already been applied
@@ -127,7 +122,7 @@ async def test_pg_multi_append_chain_verifies(pg_client):
 
 
 # ---------------------------------------------------------------------------
-# 2. SELECT ... FOR UPDATE — chain lock under concurrent writes
+# 2. pg_advisory_xact_lock — chain lock under concurrent writes
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -135,11 +130,12 @@ async def test_pg_concurrent_appends_no_chain_fork(pg_client):
     """
     Fire two append requests simultaneously via asyncio.gather().
 
-    The ChainService.append() uses SELECT ... FOR UPDATE on the last row
-    before inserting so that only one writer can hold "last row" at a time.
+    ChainService.append() calls SELECT pg_advisory_xact_lock(1) at the
+    start of every transaction — a PostgreSQL session-level mutex that
+    blocks the second writer until the first commits.  This guarantees
+    strictly monotonic, gap-free sequence numbers under any concurrency.
 
-    We seed one event first so there is always a row to lock — the
-    FOR UPDATE lock serialises subsequent concurrent writers correctly.
+    We seed one event first so the chain is non-empty before the burst.
 
     Expected outcomes
     -----------------
@@ -374,3 +370,102 @@ async def test_pg_cursor_pagination_stable_under_concurrent_write(pg_client):
     all_ids = {e["id"] for e in page1 + page2}
     original_ids = {e["id"] for e in events}
     assert all_ids == original_ids
+
+
+# ---------------------------------------------------------------------------
+# 8. Filter params on list and export (Scenario B / C requirements)
+# ---------------------------------------------------------------------------
+
+def _event_for_actor(actor: str, resource_type: str = "account", suffix: str = "") -> dict:
+    return {
+        "event_type": "access.read",
+        "actor_id": actor,
+        "resource_type": resource_type,
+        "resource_id": f"res-{suffix or actor}",
+        "payload": {"note": f"filter-test-{suffix}"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_pg_list_filter_by_actor_id(pg_client):
+    """GET /audit/events?actor_id= returns only events for that actor."""
+    # Append events for two different actors
+    for i in range(3):
+        resp = await pg_client.post("/audit/events", json=_event_for_actor("alice", suffix=str(i)))
+        assert resp.status_code == 201
+    for i in range(2):
+        resp = await pg_client.post("/audit/events", json=_event_for_actor("bob", suffix=str(i)))
+        assert resp.status_code == 201
+
+    resp = await pg_client.get("/audit/events?actor_id=alice")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["items"]) == 3
+    assert all(e["actor_id"] == "alice" for e in body["items"])
+
+
+@pytest.mark.asyncio
+async def test_pg_list_filter_by_resource_type(pg_client):
+    """GET /audit/events?resource_type= narrows results to that resource type."""
+    for i in range(2):
+        resp = await pg_client.post(
+            "/audit/events", json=_event_for_actor("sys", resource_type="account", suffix=f"a{i}")
+        )
+        assert resp.status_code == 201
+    for i in range(3):
+        resp = await pg_client.post(
+            "/audit/events", json=_event_for_actor("sys", resource_type="transaction", suffix=f"t{i}")
+        )
+        assert resp.status_code == 201
+
+    resp = await pg_client.get("/audit/events?resource_type=transaction")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["items"]) == 3
+    assert all(e["resource_type"] == "transaction" for e in body["items"])
+
+
+@pytest.mark.asyncio
+async def test_pg_export_filter_by_actor_id(pg_client):
+    """GET /audit/export?actor_id= streams only that actor's events."""
+    import json
+
+    for i in range(4):
+        resp = await pg_client.post("/audit/events", json=_event_for_actor("carol", suffix=str(i)))
+        assert resp.status_code == 201
+    for i in range(2):
+        resp = await pg_client.post("/audit/events", json=_event_for_actor("dave", suffix=str(i)))
+        assert resp.status_code == 201
+
+    resp = await pg_client.get("/audit/export?format=json&actor_id=carol")
+    assert resp.status_code == 200
+    data = json.loads(resp.content)
+    assert len(data) == 4
+    assert all(e["actor_id"] == "carol" for e in data)
+
+
+@pytest.mark.asyncio
+async def test_pg_export_filter_by_resource_type(pg_client):
+    """GET /audit/export?resource_type= streams only matching events as CSV."""
+    for i in range(3):
+        resp = await pg_client.post(
+            "/audit/events", json=_event_for_actor("system", resource_type="order", suffix=str(i))
+        )
+        assert resp.status_code == 201
+    for i in range(2):
+        resp = await pg_client.post(
+            "/audit/events", json=_event_for_actor("system", resource_type="user", suffix=str(i))
+        )
+        assert resp.status_code == 201
+
+    resp = await pg_client.get("/audit/export?format=csv&resource_type=order")
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+    lines = resp.text.strip().splitlines()
+    # header + 3 data rows
+    assert len(lines) == 4
+    # every data row has "order" in the resource_type column
+    header = lines[0].split(",")
+    rt_idx = header.index("resource_type")
+    for row in lines[1:]:
+        assert row.split(",")[rt_idx] == "order"

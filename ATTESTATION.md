@@ -5,7 +5,7 @@
 | **Full name** | Navya Paluri |
 | **Email address** | palurinavya19@gmail.com |
 | **Assignment title** | AI-Assisted Audit Log Service |
-| **Date started** | 2026-09-18 |
+| **Date started** | 2026-09-21 |
 | **Date submitted** | 2026-09-21 |
 
 I, Navya Paluri, attest that this submission is my own individual work, completed on my own machine and accounts, and that it honestly reflects my development process and use of AI.

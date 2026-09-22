@@ -7,7 +7,7 @@ A tamper-evident, append-only audit log service that satisfies all four required
 | Scenario | Requirement | Implementation |
 |---|---|---|
 | A | Append events to a tamper-evident chain | SHA-256 chain: `entry_hash` over `(sequence_number, actor_id, resource_type, resource_id, payload_hash, prev_chain_hash)`, each row's `chain_hash = SHA256(entry_hash + prev_chain_hash)` |
-| B | Export a self-contained verifiable bundle for a specific actor or resource | `GET /audit/export?actor_id=…` and `GET /audit/export?resource_type=…&resource_id=…` stream a filtered JSON or CSV export |
+| B | Export a self-contained verifiable bundle for a specific actor or resource | `GET /audit/export?actor_id=…` and `GET /audit/export?resource_type=…&resource_id=…` stream a filtered JSON or CSV export; each record includes `prev_chain_hash` (the chain_hash of the preceding row in the full chain) so a recipient can verify `SHA256(entry_hash \|\| prev_chain_hash) == chain_hash` entirely offline, without server access |
 | C | Regulators audit access to client account data (ambiguous) | Clarified via explicit assumptions (see `SCENARIO_C.md`); implemented as `resource_type` filtering on list and export endpoints |
 | D | Field-level redaction without breaking the chain | `PATCH /audit/events/{id}/redact` zeroes payload fields and records `{field, hash}` in `redacted_fields`; `entry_hash` uses `payload_hash` (hash of original payload), not the payload itself, so redaction never invalidates the chain |
 
@@ -39,7 +39,7 @@ Alembic migrations 002 (`redacted_fields`, `payload_hash` columns) and 003 (`is_
 | `app/models/audit_entry.py` | SQLAlchemy ORM model; all chain and compliance columns |
 | `app/services/chain_service.py` | `append()` with `pg_advisory_xact_lock` serialisation, `verify_chain()` |
 | `app/services/query_service.py` | Cursor-based paginated listing with full filter set |
-| `app/services/export_service.py` | Async generator streaming export (JSON + CSV) with filter support |
+| `app/services/export_service.py` | Async generator streaming export (JSON + CSV) with `actor_id` / `resource_type` / `resource_id` filters and `prev_chain_hash` anchor for offline bundle verification |
 | `app/services/redaction_service.py` | Chain-safe field-level redaction |
 | `app/services/retention_service.py` | Soft-delete archival |
 | `app/api/routes/events.py` | POST/GET events routes with full filter params |
@@ -48,7 +48,7 @@ Alembic migrations 002 (`redacted_fields`, `payload_hash` columns) and 003 (`is_
 | `alembic/versions/002_add_redaction_columns.py` | `redacted_fields`, `payload_hash` |
 | `alembic/versions/003_add_archival_columns.py` | `is_archived`, `archived_at` |
 | `tests/` | 88 tests: unit (hashing), integration (SQLite), PostgreSQL integration |
-| `DECISIONS.md` | 13 Architecture Decision Records |
+| `DECISIONS.md` | 14 Architecture Decision Records |
 | `SCENARIO_C.md` | Ambiguous requirement clarification write-up |
 
 ---
@@ -66,6 +66,9 @@ The most important design choice. If `entry_hash` were computed over the raw pay
 
 **Soft-delete archival, never physical delete**  
 Deleting a row breaks the chain: the next row's `chain_hash` references a predecessor that no longer exists. Archived rows stay in the table with all hash fields intact. The archive flag signals "operationally retired" while preserving the entry for legal compliance.
+
+**`prev_chain_hash` in every exported record**  
+A filtered export (by `actor_id` or `resource_type`/`resource_id`) contains only a subset of chain records. Each record's `chain_hash` is `SHA256(entry_hash + prev_chain_hash)` where `prev_chain_hash` is the `chain_hash` of the immediately preceding record in the *full* chain — which may not be in the filtered bundle. Without embedding `prev_chain_hash` in the export, a recipient cannot verify chain integrity offline. Including it means any recipient can verify `SHA256(entry_hash || prev_chain_hash) == chain_hash` for every record in the file using only the bundle itself — no server call, no access to records they did not receive. This is the same principle used in Merkle proof bundles in Certificate Transparency.
 
 ---
 
@@ -90,6 +93,7 @@ Deleting a row breaks the chain: the next row's `chain_hash` references a predec
 | In-row payload storage | Simple, all data in one query | Very large payloads (>1 MB) would inflate row size; a TOAST pointer or object-store reference would be needed |
 | Soft-delete archival | Chain stays intact; archived entries visible to verify | Storage grows monotonically; a physical purge after a statutory retention window would require rebuilding the chain tail |
 | SQLite for test isolation | Fast, zero-dependency test runs | Two features (advisory lock, JSONB operators) must be integration-tested against real Postgres |
+| `prev_chain_hash` anchor in export | Filtered bundles are fully self-contained; offline verification needs no server | One extra DB round-trip per 500-row batch to fetch predecessor hashes; negligible for an audit log export |
 
 ---
 

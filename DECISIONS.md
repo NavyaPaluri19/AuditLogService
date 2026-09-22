@@ -193,9 +193,12 @@ Truncating the payload or replacing it with a cold-storage reference would also 
 - Cursor pagination inside the generator (`WHERE sequence_number > last_seq`) uses the existing B-tree index and keeps DB round-trips bounded regardless of table size
 - `StreamingResponse` in FastAPI forwards chunks to the HTTP client as they arrive — no extra buffering layer
 
+**Filter params:** `actor_id`, `resource_type`, `resource_id`, and `include_archived` are accepted as query parameters on `GET /audit/export`, matching the filter set on `GET /audit/events`. A DRY `_build_base_query()` helper in `export_service.py` applies these filters for both JSON and CSV generators.
+
 **Format decisions:**
 - JSON: top-level array with one object per line — valid JSON and line-delimited, easy to `jq`-pipe
 - CSV: RFC 4180; `payload` and `redacted_fields` columns are JSON-encoded strings so the schema stays flat
+- Both formats include `prev_chain_hash` in every exported row — see ADR-014
 
 ---
 
@@ -209,6 +212,26 @@ Truncating the payload or replacing it with a cold-storage reference would also 
 - Redaction itself is always chain-safe (hashes never change), but the business rule that archived records are immutable is the right guardrail for an audit system
 
 **Alternative considered:** allow redaction on archived entries — rejected because it makes the archive state meaningless as an immutability signal.
+
+---
+
+## ADR-014 — Export includes prev_chain_hash anchor for offline bundle verification
+
+**Decision:** Every record in `GET /audit/export` (JSON and CSV) includes a `prev_chain_hash` field: the `chain_hash` of the immediately preceding record in the full chain (or `GENESIS_HASH = "0" * 64` for the first record).
+
+**The problem:** A filtered export (e.g. `?actor_id=alice`) contains only a subset of chain records. Each record's `chain_hash = SHA256(entry_hash + prev_chain_hash)` where `prev_chain_hash` is the chain_hash of `sequence_number - 1` in the *full* chain — a record the recipient almost certainly did not receive. Without this anchor, a recipient can verify each record's `entry_hash` independently, but cannot verify chain continuity without calling the server.
+
+**Solution:** At export time, after fetching each page of filtered rows, the service queries the full (unfiltered) chain for `chain_hash` values at `sequence_number - 1` for every row in the page. These are embedded as `prev_chain_hash` in the exported record. A recipient can then verify:
+
+```python
+SHA256(entry_hash || prev_chain_hash) == chain_hash
+```
+
+for every record in the file, using only the bundle — no server access, no knowledge of records they did not receive.
+
+**Cost:** One additional DB round-trip per 500-row export batch, fetching only `(sequence_number, chain_hash)` for the predecessor set. For an export endpoint that is already doing sequential I/O, this is negligible.
+
+**Precedent:** This is the same principle as a Merkle proof in Certificate Transparency, where each log leaf is accompanied by sibling hashes sufficient to reconstruct the root — a verifier needs only the leaf and the proof, not the entire log.
 
 ---
 
